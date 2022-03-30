@@ -337,18 +337,21 @@ class Data2VecAudioModel(BaseFairseqModel):
         with torch.no_grad():
             assert high > 1, f"{bsz,tsz,fsz}"
 
-            if self.n_negatives > 0: # !!! n_negatives: 0
-                tszs = (
-                    buffered_arange(num)
-                    .unsqueeze(-1)
-                    .expand(-1, self.n_negatives)
-                    .flatten()
-                )
-
+            if self.n_negatives > 0:
+                # tszs = (buffered_arange(num).unsqueeze(-1).expand(-1, self.n_negatives).flatten())
                 neg_idxs = torch.randint(
-                    low=0, high=high - 1, size=(bsz, self.n_negatives * num)
+                    low=0, high=high - 1, size=(bsz, self.n_negatives * num), device=y.device
                 )
-                neg_idxs[neg_idxs >= tszs] += 1 #!!! what is this? not important 
+                tszs = (torch.arange(num, dtype=neg_idxs.dtype, device=y.device).unsqueeze(-1).expand(-1, self.n_negatives).flatten())
+
+                # neg_idxs[neg_idxs >= tszs] += 1
+                bool_tensor = torch.tensor(neg_idxs >= tszs, dtype=neg_idxs.dtype, device=y.device)
+                neg_idxs += bool_tensor
+
+                # xyz = neg_idxs >= tszs
+                # print ("xiexie1 neg_idx size: {}, tszs.size: {}".format(neg_idxs.size(), tszs.size()))
+                # print ("xiexie2 neg_idxs size: {}".format(neg_idxs.size()))
+                # print ("xiexie3 xyz size: {}".format(xyz.size()))
 
             if self.cross_sample_negatives > 0:
                 tszs = (
@@ -366,7 +369,9 @@ class Data2VecAudioModel(BaseFairseqModel):
                 cross_neg_idxs[cross_neg_idxs >= tszs] += 1
 
         if self.n_negatives > 0:
-            neg_idxs = neg_idxs + (torch.arange(bsz).unsqueeze(1) * high)
+            plus = (torch.arange(bsz, device=y.device).unsqueeze(1) * high)
+            neg_idxs = neg_idxs + plus
+            # neg_idxs = neg_idxs + (torch.arange(bsz).unsqueeze(1) * high)
         else:
             neg_idxs = cross_neg_idxs
 
@@ -378,7 +383,7 @@ class Data2VecAudioModel(BaseFairseqModel):
             bsz, num, self.n_negatives + self.cross_sample_negatives, fsz
         ).permute(
             2, 0, 1, 3
-        )  # to NxBxTxC # !!! what is the meaning of n??
+        )  # to NxBxTxC
         return negs, neg_idxs
 
     def forward(
@@ -404,9 +409,6 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         features = features.transpose(1, 2)
         features = self.layer_norm(features)
-        unmasked_features = features.clone()
-
-        orig_padding_mask = padding_mask
 
         if padding_mask is not None and padding_mask.any():
             input_lengths = (1 - padding_mask.long()).sum(-1)
@@ -452,7 +454,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         x, layer_results = self.encoder( #!!! transformer encoder BxCx768, record the every layer's result
             x,
             padding_mask=padding_mask,
-            layer=layer, # TODO
+            layer=layer,
         )
 
         y, layer_results_y = self.encoder( #!!! transformer encoder BxCx768, record the every layer's result
@@ -574,7 +576,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         # else:
         #     scale = 1 / math.sqrt(sz)
 
-        # TODO neg & pos
+        # TODO neg & pos 
         negs, _ =  self.sample_negatives(y,y.size(1),padding_count=padding_count) # negs:[100,1,413,768]
 
         # TODO cal loss (the 1st step)
@@ -599,24 +601,26 @@ class Data2VecAudioModel(BaseFairseqModel):
         if "sample_size" not in result:
             result["sample_size"] = target.numel() # sample size = total mask = sum(sum(mask))
 
-        # with torch.no_grad():
-        #     result["target_var"] = self.compute_var(y) # !!! what is the meaning of target war?
-        #     result["pred_var"] = self.compute_var(x.float())
+        # TODO
+        with torch.no_grad():
+            result["target_var"] = self.compute_var(y) # !!! what is the meaning of target war?
+            result["pred_var"] = self.compute_var(x.float())
 
-        # if self.num_updates > 5000 and result["target_var"] < self.cfg.min_target_var: # !!! auto exiting??
-        #     logger.error(
-        #         f"target var is {result['target_var'].item()} < {self.cfg.min_target_var}, exiting"
-        #     )
-        #     raise Exception(
-        #         f"target var is {result['target_var'].item()} < {self.cfg.min_target_var}, exiting"
-        #     )
-        # if self.num_updates > 5000 and result["pred_var"] < self.cfg.min_pred_var:
-        #     logger.error(
-        #         f"pred var is {result['pred_var'].item()} < {self.cfg.min_pred_var}, exiting"
-        #     )
-        #     raise Exception(
-        #         f"pred var is {result['pred_var'].item()} < {self.cfg.min_pred_var}, exiting"
-        #     )
+        # TODO 是否出现模式坍塌
+        if self.num_updates > 5000 and result["target_var"] < self.cfg.min_target_var: # !!! auto exiting??
+            logger.error(
+                f"target var is {result['target_var'].item()} < {self.cfg.min_target_var}, exiting"
+            )
+            raise Exception(
+                f"target var is {result['target_var'].item()} < {self.cfg.min_target_var}, exiting"
+            )
+        if self.num_updates > 5000 and result["pred_var"] < self.cfg.min_pred_var:
+            logger.error(
+                f"pred var is {result['pred_var'].item()} < {self.cfg.min_pred_var}, exiting"
+            )
+            raise Exception(
+                f"pred var is {result['pred_var'].item()} < {self.cfg.min_pred_var}, exiting"
+            )
 
         # if self.ema is not None:
         #     result["ema_decay"] = self.ema.get_decay() * 1000
