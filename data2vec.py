@@ -153,9 +153,43 @@ class Data2VecAudioModel(BaseFairseqModel):
 
     def make_ema_teacher(self):
         pass
+        # ema_config = EMAModuleConfig(
+        #     ema_decay=self.cfg.ema_decay,
+        #     ema_fp32=True,
+        # )
+        # skip_keys = set()
+        # if self.cfg.ema_layers_only:
+        #     self.cfg.ema_transformer_only = True
+        #     for k, _ in self.encoder.pos_conv.named_parameters():
+        #         skip_keys.add(f"pos_conv.{k}")
+
+        # self.ema = EMAModule(
+        #     self.encoder if self.cfg.ema_transformer_only else self,
+        #     ema_config,
+        #     skip_keys=skip_keys,
+        # )
 
     def set_num_updates(self, num_updates):
         super().set_num_updates(num_updates)
+
+        # if self.ema is None and self.final_proj is not None:
+        #     logger.info(f"making ema teacher")
+        #     self.make_ema_teacher()
+        # elif self.training and self.ema is not None:
+        #     if self.cfg.ema_decay != self.cfg.ema_end_decay:
+        #         if num_updates >= self.cfg.ema_anneal_end_step:
+        #             decay = self.cfg.ema_end_decay # !!! final decay
+        #         else:
+        #             decay = get_annealed_rate( #!!! EMA steps
+        #                 self.cfg.ema_decay,
+        #                 self.cfg.ema_end_decay,
+        #                 num_updates,
+        #                 self.cfg.ema_anneal_end_step,
+        #             )
+        #         self.ema.set_decay(decay) # !!! set the val of teacher model
+        #     if self.ema.get_decay() < 1: # !!! may never to 1? 
+        #         self.ema.step(self.encoder if self.cfg.ema_transformer_only else self) #!!! update the teacher model
+
         self.num_updates = num_updates
 
     def state_dict(self, destination=None, prefix="", keep_vars=False):
@@ -172,6 +206,14 @@ class Data2VecAudioModel(BaseFairseqModel):
             assert k in state_dict
             self.ema.restore(state_dict[k], True)
             del state_dict[k]
+
+        # 在superb里，这里好像得加上这几句
+        k = prefix + "_ema"
+        del state_dict[k]
+        state_dict['final_proj.weight']=state_dict['final_proj.0.weight']
+        state_dict['final_proj.bias']=state_dict['final_proj.0.bias']
+        del state_dict['final_proj.0.weight']
+        del state_dict['final_proj.0.bias']
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @classmethod
@@ -314,6 +356,11 @@ class Data2VecAudioModel(BaseFairseqModel):
                 bool_tensor = torch.tensor(neg_idxs >= tszs, dtype=neg_idxs.dtype, device=y.device)
                 neg_idxs += bool_tensor
 
+                # xyz = neg_idxs >= tszs
+                # print ("xiexie1 neg_idx size: {}, tszs.size: {}".format(neg_idxs.size(), tszs.size()))
+                # print ("xiexie2 neg_idxs size: {}".format(neg_idxs.size()))
+                # print ("xiexie3 xyz size: {}".format(xyz.size()))
+
             if self.cross_sample_negatives > 0:
                 tszs = (
                     buffered_arange(num)
@@ -395,6 +442,10 @@ class Data2VecAudioModel(BaseFairseqModel):
         if self.post_extract_proj is not None:
             features = self.post_extract_proj(features) # [1,773,512]=>[1,773,768]
 
+        # pre_encoder_features = None
+        # if self.cfg.ema_transformer_only: #!!! what's the meaning of the param
+        #     pre_encoder_features = features.clone()
+
         features = self.dropout_input(features)
 
         if mask:
@@ -431,6 +482,79 @@ class Data2VecAudioModel(BaseFairseqModel):
             "losses": {},
         }
 
+        # with torch.no_grad():
+        #     self.ema.model.eval()
+
+        #     if self.cfg.ema_transformer_only: #!!! ???
+        #         y, layer_results = self.ema.model.extract_features( # !!! same as wav2vec
+        #             pre_encoder_features,
+        #             padding_mask=padding_mask,
+        #             min_layer=self.cfg.encoder_layers - self.average_top_k_layers,
+        #         )
+        #         y = {
+        #             "x": y,
+        #             "padding_mask": padding_mask,
+        #             "layer_results": layer_results,
+        #         }
+        #     else:
+        #         y = self.ema.model.extract_features(
+        #             source=source,
+        #             padding_mask=orig_padding_mask,
+        #             mask=False,
+        #         )
+
+        #     target_layer_results = [l[2] for l in y["layer_results"]]
+
+        #     permuted = False
+        #     if self.cfg.instance_norm_target_layer or self.cfg.batch_norm_target_layer:
+        #         target_layer_results = [
+        #             tl.permute(1, 2, 0) for tl in target_layer_results  # TBC -> BCT
+        #         ]
+        #         permuted = True
+
+        #     if self.cfg.batch_norm_target_layer:
+        #         target_layer_results = [
+        #             F.batch_norm(
+        #                 tl.float(), running_mean=None, running_var=None, training=True
+        #             )
+        #             for tl in target_layer_results
+        #         ]
+
+        #     if self.cfg.instance_norm_target_layer:
+        #         target_layer_results = [
+        #             F.instance_norm(tl.float()) for tl in target_layer_results
+        #         ]
+
+        #     if permuted:
+        #         target_layer_results = [
+        #             tl.transpose(1, 2) for tl in target_layer_results  # BCT -> BTC
+        #         ]
+
+        #     if self.cfg.group_norm_target_layer:
+        #         target_layer_results = [
+        #             F.layer_norm(tl.float(), tl.shape[-2:])
+        #             for tl in target_layer_results
+        #         ]
+
+        #     if self.cfg.layer_norm_target_layer:
+        #         target_layer_results = [
+        #             F.layer_norm(tl.float(), tl.shape[-1:])
+        #             for tl in target_layer_results
+        #         ]
+
+        #     y = sum(target_layer_results) / len(target_layer_results)
+
+        #     if self.cfg.layer_norm_targets:
+        #         y = F.layer_norm(y.float(), y.shape[-1:])
+
+        #     if self.cfg.instance_norm_targets:
+        #         y = F.instance_norm(y.float().transpose(1, 2)).transpose(1, 2)
+
+        #     if not permuted:
+        #         y = y.transpose(0, 1)
+
+        #     y = y[mask_indices]
+
         if not is_xla_tensor(x):
             # tpu-comment: reducing the size in a dynamic way causes
             # too many recompilations on xla.
@@ -445,6 +569,20 @@ class Data2VecAudioModel(BaseFairseqModel):
         #  x = x[mask_indices] #!!! what is the difference betwwen x and y? x is student, y is teacher
         x = self.final_proj(x) # [1,413,768]=>[1,413,768]
         y = self.final_proj(y)
+
+        # sz = x.size(-1) # !!! 4940x768
+
+        # if self.loss_beta == 0:
+        #     loss = F.mse_loss(x.float(), y.float(), reduction="none").sum(dim=-1) #!!! why use this loss?
+        # else:
+        #     loss = F.smooth_l1_loss(
+        #         x.float(), y.float(), reduction="none", beta=self.loss_beta
+        #      ).sum(dim=-1)
+
+        # if self.loss_scale is not None:
+        #     scale = self.loss_scale
+        # else:
+        #     scale = 1 / math.sqrt(sz)
 
         # TODO neg & pos 
         negs, _ =  self.sample_negatives(y,y.size(1),padding_count=padding_count) # negs:[100,1,413,768]
@@ -476,7 +614,7 @@ class Data2VecAudioModel(BaseFairseqModel):
             result["target_var"] = self.compute_var(y) # !!! what is the meaning of target war?
             result["pred_var"] = self.compute_var(x.float())
 
-        # TODO Test whether there is a mode collapse
+        # TODO 是否出现模式坍塌
         if self.num_updates > 5000 and result["target_var"] < self.cfg.min_target_var: # !!! auto exiting??
             logger.error(
                 f"target var is {result['target_var'].item()} < {self.cfg.min_target_var}, exiting"
@@ -491,6 +629,9 @@ class Data2VecAudioModel(BaseFairseqModel):
             raise Exception(
                 f"pred var is {result['pred_var'].item()} < {self.cfg.min_pred_var}, exiting"
             )
+
+        # if self.ema is not None:
+        #     result["ema_decay"] = self.ema.get_decay() * 1000
 
         return result
 
