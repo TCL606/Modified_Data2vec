@@ -95,7 +95,7 @@ class Data2VecAudioModel(BaseFairseqModel):
     def __init__(self, cfg: Data2VecAudioConfig):
         super().__init__()
         self.cfg = cfg
-
+        print("TCL and WYJ Modified this file. This task started running at 2022.4.14")
         feature_enc_layers = eval(cfg.conv_feature_layers)
         self.extractor_embed = feature_enc_layers[-1][0]
 
@@ -206,14 +206,6 @@ class Data2VecAudioModel(BaseFairseqModel):
             assert k in state_dict
             self.ema.restore(state_dict[k], True)
             del state_dict[k]
-
-        # 在superb里，这里好像得加上这几句
-        k = prefix + "_ema"
-        del state_dict[k]
-        state_dict['final_proj.weight']=state_dict['final_proj.0.weight']
-        state_dict['final_proj.bias']=state_dict['final_proj.0.bias']
-        del state_dict['final_proj.0.weight']
-        del state_dict['final_proj.0.bias']
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @classmethod
@@ -465,12 +457,6 @@ class Data2VecAudioModel(BaseFairseqModel):
             layer=layer,
         )
 
-        y, layer_results_y = self.encoder( #!!! transformer encoder BxCx768, record the every layer's result
-            features, # feature is the unmask x
-            padding_mask=padding_mask,
-            layer=layer, # None
-        )
-
         if features_only:
             return {
                 "x": x,
@@ -481,7 +467,14 @@ class Data2VecAudioModel(BaseFairseqModel):
         result = {
             "losses": {},
         }
-
+        
+        with torch.no_grad():
+            y, layer_results_y = self.encoder( #!!! transformer encoder BxCx768, record the every layer's result
+                features, # feature is the unmask x
+                padding_mask=padding_mask,
+                layer=layer, # None
+            )
+        
         # with torch.no_grad():
         #     self.ema.model.eval()
 
@@ -568,8 +561,7 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         #  x = x[mask_indices] #!!! what is the difference betwwen x and y? x is student, y is teacher
         x = self.final_proj(x) # [1,413,768]=>[1,413,768]
-        y = self.final_proj(y)
-
+        
         # sz = x.size(-1) # !!! 4940x768
 
         # if self.loss_beta == 0:
@@ -580,9 +572,9 @@ class Data2VecAudioModel(BaseFairseqModel):
         #      ).sum(dim=-1)
 
         # if self.loss_scale is not None:
-        #     scale = self.loss_scale
+        #      scale = self.loss_scale
         # else:
-        #     scale = 1 / math.sqrt(sz)
+        #      scale = 1 / math.sqrt(sz)
 
         # TODO neg & pos 
         negs, _ =  self.sample_negatives(y,y.size(1),padding_count=padding_count) # negs:[100,1,413,768]
@@ -599,7 +591,7 @@ class Data2VecAudioModel(BaseFairseqModel):
         reduce = True # copy from wav2vec_criterion
         reduction = "none" if ((not reduce) or self.xla) else "sum"
         loss = F.cross_entropy(logits, target, reduction=reduction)
-        # result["losses"]["regression"] = loss.sum() * scale
+        # result["losses"]["regression"] = loss.sum() * scale       # scale is a constant. There is no need to calculate it
         result["losses"]["regression"] = loss.sum()
         
         # if "sample_size" not in result:
@@ -611,7 +603,7 @@ class Data2VecAudioModel(BaseFairseqModel):
 
         # TODO
         with torch.no_grad():
-            result["target_var"] = self.compute_var(y) # !!! what is the meaning of target war?
+            result["target_var"] = self.compute_var(y.float()) 
             result["pred_var"] = self.compute_var(x.float())
 
         # TODO 是否出现模式坍塌
